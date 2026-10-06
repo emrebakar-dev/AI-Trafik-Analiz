@@ -2,16 +2,38 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+print("Kutuphaneler yukleniyor (ilk acilis biraz surebilir)...", flush=True)
+
 import cv2
+import torch
 from ultralytics import YOLO
 
 
-REPORTS_DIR = Path("reports")
-VIDEO_PATH = Path("trafik.mov")
-MODEL_NAME = "yolo11s.pt"
+BASE_DIR = Path(__file__).resolve().parent
+
+REPORTS_DIR = BASE_DIR / "reports"
+VIDEO_PATH = BASE_DIR / "trafik.mov"
+MODEL_NAME = str(BASE_DIR / "yolo11s.pt")
 
 CONFIDENCE_THRESHOLD = 0.35
-IMAGE_SIZE = 960
+IMAGE_SIZE = 640
+
+MAX_FRAME_WIDTH = 1280
+FRAME_STRIDE = 2
+
+
+def select_device() -> str:
+    """Mevcut en hizli cihazi secer (CUDA > Apple MPS > CPU)."""
+    if torch.cuda.is_available():
+        return "cuda"
+
+    if torch.backends.mps.is_available():
+        return "mps"
+
+    return "cpu"
+
+
+DEVICE = select_device()
 
 LINE_MARGIN = 20
 
@@ -112,6 +134,16 @@ def main() -> None:
         print(f"Video bulunamadi: {VIDEO_PATH}")
         return
 
+    SF_DATALESS = 0x40000000
+    if getattr(VIDEO_PATH.stat(), "st_flags", 0) & SF_DATALESS:
+        print(
+            "UYARI: trafik.mov iCloud'da duruyor, bilgisayara indirilmemis.\n"
+            "Finder'da dosyaya sag tiklayip 'Simdi Indir' secin veya projeyi\n"
+            "Masaustu/iCloud disindaki bir klasore tasiyin, sonra tekrar deneyin."
+        )
+        return
+
+    print(f"Model yukleniyor: {Path(MODEL_NAME).name} ({DEVICE})", flush=True)
     model = YOLO(MODEL_NAME)
     video = cv2.VideoCapture(str(VIDEO_PATH))
 
@@ -145,7 +177,19 @@ def main() -> None:
 
     analysis_completed = True
 
+    print("Analiz basliyor. Cikmak icin 'q' tusuna basin.", flush=True)
+
     while True:
+        skipped = True
+        for _ in range(FRAME_STRIDE - 1):
+            if not video.grab():
+                skipped = False
+                break
+            frame_number += 1
+
+        if not skipped:
+            break
+
         success, frame = video.read()
 
         if not success:
@@ -155,6 +199,17 @@ def main() -> None:
         current_time = frame_number / fps
 
         frame_height, frame_width = frame.shape[:2]
+
+        if frame_width > MAX_FRAME_WIDTH:
+            scale = MAX_FRAME_WIDTH / frame_width
+            frame = cv2.resize(
+                frame,
+                None,
+                fx=scale,
+                fy=scale,
+                interpolation=cv2.INTER_AREA,
+            )
+            frame_height, frame_width = frame.shape[:2]
 
         line_y = frame_height // 2
 
@@ -174,6 +229,8 @@ def main() -> None:
             persist=True,
             conf=CONFIDENCE_THRESHOLD,
             imgsz=IMAGE_SIZE,
+            device=DEVICE,
+            half=(DEVICE == "cuda"),
             classes=VEHICLE_CLASS_IDS,
             tracker="bytetrack.yaml",
             verbose=False,
